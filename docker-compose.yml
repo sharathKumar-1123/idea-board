@@ -1,0 +1,37 @@
+# Local development stack: http://localhost:3000 (UI) and http://localhost:8000/docs (API).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ideas
+      POSTGRES_USER: ideas
+      POSTGRES_PASSWORD: ideas # local-only credentials
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ideas -d ideas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://ideas:ideas@db:5432/ideas
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "3000:8080"
+
+volumes:
+  db-data:

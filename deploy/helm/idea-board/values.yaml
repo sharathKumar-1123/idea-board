@@ -1,0 +1,40 @@
+# Cloud-neutral defaults. Per-cloud differences live in values-<cloud>.yaml.
+
+backend:
+  image:
+    repository: ghcr.io/sharathkumar-1123/idea-board-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+frontend:
+  image:
+    repository: ghcr.io/sharathkumar-1123/idea-board-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+database:
+  # Kubernetes Secret with keys: host, port, name, username, password.
+  # Created by the deploy pipeline from Terraform outputs.
+  secretName: idea-board-db
+  # Demo/chaos only: overrides the DB host to simulate a broken deployment.
+  hostOverride: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  host: ""
+  annotations: {}

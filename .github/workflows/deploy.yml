@@ -1,0 +1,177 @@
+name: Deploy
+
+# Runs after CI succeeds on main, or manually (with optional chaos to demo the AI rollback).
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (commit SHA). Empty = current commit."
+        required: false
+        default: ""
+      chaos:
+        description: "Inject a failure to demo AI health check + rollback"
+        type: choice
+        options: [none, bad-db, bad-image]
+        default: none
+
+permissions:
+  contents: read
+  models: read # GitHub Models fallback for the AI health check
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+env:
+  CLOUD: aws
+  AWS_REGION: us-east-1
+  TF_DIR: infra/envs/aws
+  RELEASE: idea-board
+  NAMESPACE: idea-board
+  CHART: deploy/helm/idea-board
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve image tag
+        run: echo "IMAGE_TAG=${{ inputs.image_tag || github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ---------- Infrastructure ----------
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}"
+          terraform apply -auto-approve -input=false
+
+      - name: Read infrastructure outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          DB_PASSWORD="$(terraform output -raw db_password)"
+          echo "::add-mask::$DB_PASSWORD"
+          {
+            echo "KUBECONFIG_CMD=$(terraform output -raw kubeconfig_command)"
+            echo "DB_HOST=$(terraform output -raw db_host)"
+            echo "DB_PORT=$(terraform output -raw db_port)"
+            echo "DB_NAME=$(terraform output -raw db_name)"
+            echo "DB_USER=$(terraform output -raw db_username)"
+            echo "DB_PASSWORD=$DB_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # ---------- Cluster prerequisites ----------
+      - uses: azure/setup-helm@v4
+
+      - name: Connect to cluster
+        run: $KUBECONFIG_CMD
+
+      - name: Install ingress-nginx
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace --wait --timeout 10m
+
+      - name: Create database secret
+        run: |
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic idea-board-db -n "$NAMESPACE" \
+            --from-literal=host="$DB_HOST" \
+            --from-literal=port="$DB_PORT" \
+            --from-literal=name="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # ---------- Application ----------
+      - name: Helm upgrade
+        id: helm
+        continue-on-error: true # the health gate below decides what happens next
+        run: |
+          EXTRA=()
+          case "${{ inputs.chaos || 'none' }}" in
+            bad-db)    EXTRA+=(--set database.hostOverride=db.invalid.example) ;;
+            bad-image) EXTRA+=(--set backend.image.tag=does-not-exist) ;;
+          esac
+          helm upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" \
+            -f "$CHART/values-$CLOUD.yaml" \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --set frontend.image.tag="$IMAGE_TAG" \
+            "${EXTRA[@]}" \
+            --wait --timeout 4m
+
+      - name: Resolve public URL
+        run: |
+          for _ in $(seq 1 30); do
+            HOST="$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')"
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          echo "APP_URL=http://$HOST" >> "$GITHUB_ENV"
+          echo "Application URL: http://$HOST"
+
+      # ---------- AI health gate ----------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: AI health check
+        id: health
+        continue-on-error: true
+        working-directory: scripts/ai
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER || 'bedrock' }}
+          BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip install -q -r requirements.txt
+          python health_check.py --namespace "$NAMESPACE" --release "$RELEASE" --url "$APP_URL"
+
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-report
+          path: scripts/ai/health-report.json
+          if-no-files-found: ignore
+
+      - name: Roll back unhealthy release
+        if: steps.health.outcome == 'failure'
+        run: |
+          REVISIONS="$(helm history "$RELEASE" -n "$NAMESPACE" -o json | jq length)"
+          if [ "$REVISIONS" -gt 1 ]; then
+            helm rollback "$RELEASE" 0 -n "$NAMESPACE" --wait --timeout 5m
+            echo "### ↩️ Rolled back to the previous release" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ First release is unhealthy and there is nothing to roll back to" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 1
+
+      - name: Deployment summary
+        if: steps.health.outcome == 'success'
+        run: |
+          {
+            echo "### 🚀 Deployed \`$IMAGE_TAG\` to $CLOUD"
+            echo "Application URL: $APP_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

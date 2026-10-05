@@ -1,0 +1,86 @@
+{{- $name := printf "%s-backend" (include "idea-board.fullname" .) -}}
+{{- $secret := .Values.database.secretName -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "idea-board.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "idea-board.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "idea-board.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DB_HOST
+              {{- if .Values.database.hostOverride }}
+              value: {{ .Values.database.hostOverride | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: host }
+              {{- end }}
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: port }
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: name }
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: username }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: password }
+            - name: DATABASE_URL
+              value: "postgresql+psycopg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "idea-board.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  selector:
+    {{- include "idea-board.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

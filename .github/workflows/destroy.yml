@@ -1,0 +1,59 @@
+name: Destroy
+
+# Manual teardown to stop cloud costs. Requires typing the cloud name to confirm.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "aws" to destroy all AWS infrastructure'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/envs/aws
+
+jobs:
+  destroy:
+    if: inputs.confirm == 'aws'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - uses: azure/setup-helm@v4
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      # The ingress controller's load balancer is created by Kubernetes, not Terraform;
+      # remove it first so the VPC can be deleted cleanly.
+      - name: Remove Kubernetes-managed load balancer
+        working-directory: ${{ env.TF_DIR }}
+        continue-on-error: true
+        run: |
+          $(terraform output -raw kubeconfig_command)
+          helm uninstall idea-board -n idea-board || true
+          helm uninstall ingress-nginx -n ingress-nginx --wait || true
+          # AWS releases the load balancer's network interfaces asynchronously; give it time
+          # so the VPC/subnet deletion below doesn't hit a DependencyViolation.
+          sleep 90
+
+      - name: Terraform destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform destroy -auto-approve -input=false

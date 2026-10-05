@@ -1,0 +1,4 @@
+# AWS (EKS) overrides. ingress-nginx's Service gets an AWS load balancer automatically,
+# so nothing AWS-specific is needed by the app itself.
+ingress:
+  className: nginx
