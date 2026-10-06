@@ -89,6 +89,16 @@ def collect_evidence(namespace: str, release: str, base_url: str) -> dict:
         f"--tail={MAX_LOG_LINES}", "--prefix", "--all-containers",
     ).splitlines()[-MAX_LOG_LINES:]
 
+    pods = collect_pods(namespace, release)
+    # A crash-looping container has usually just restarted, so its current log is nearly empty;
+    # the actual error is in the log of the previous (crashed) attempt.
+    for pod in pods:
+        if pod["restarts"] > 0 and not pod["ready"]:
+            previous = kubectl(
+                "logs", "-n", namespace, pod["name"], "--previous", "--all-containers", "--tail=40"
+            ).splitlines()
+            logs += [f"[{pod['name']} previous crash] {line}" for line in previous]
+
     probes = []
     if base_url:
         base_url = base_url.rstrip("/")
@@ -99,7 +109,7 @@ def collect_evidence(namespace: str, release: str, base_url: str) -> dict:
     return {
         "release": release,
         "namespace": namespace,
-        "pods": collect_pods(namespace, release),
+        "pods": pods,
         "events": events,
         "backend_logs": logs,
         "http_probes": probes,

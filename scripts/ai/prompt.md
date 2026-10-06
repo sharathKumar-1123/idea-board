@@ -12,6 +12,9 @@ Decide whether the deployment is healthy enough to keep serving users.
 Guidelines:
 - A few restarts that have stopped, or a warning that resolved itself, can still be healthy.
 - Repeated errors in logs, failing probes, crash loops, image pull failures, or database connection errors are unhealthy.
+- Look for the root cause, not just the symptom: a crash loop or failing probe is a symptom. If the logs contain
+  an explicit error message (e.g. a hostname that cannot be resolved, a refused connection, a missing module),
+  name it and quote the key part in `likely_cause`.
 - Base your answer only on the evidence. If the evidence is thin, say so and lower your confidence.
 - Write for an on-call engineer: concrete, short, no filler.
 
