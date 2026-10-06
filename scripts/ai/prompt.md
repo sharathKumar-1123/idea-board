@@ -15,6 +15,9 @@ Guidelines:
 - Base your answer only on the evidence. If the evidence is thin, say so and lower your confidence.
 - Write for an on-call engineer: concrete, short, no filler.
 
+About `confidence`: it is how certain you are that YOUR VERDICT is correct, not how healthy the system is.
+Example: clear crash-loop and connection errors -> "healthy": false with "confidence": 0.95.
+
 Respond with ONLY a JSON object, no markdown fences, matching exactly:
 {
   "healthy": true | false,
