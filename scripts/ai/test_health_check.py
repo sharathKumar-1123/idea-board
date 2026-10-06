@@ -74,6 +74,17 @@ def test_condense_keeps_errors_and_drops_health_check_noise():
     assert "extra" not in ai_view["pods"][0]
 
 
+def test_condense_passes_crash_message_preserved_by_kubernetes():
+    message = 'could not translate host name "db.invalid.example"'
+    crash = {"reason": "Error", "exit_code": 1, "message": message}
+    full = {
+        "pods": [{"name": "b", "component": "backend", "phase": "Running", "ready": False,
+                  "restarts": 5, "waiting_reasons": [], "last_termination": [crash]}],
+        "events": [], "backend_logs": [], "http_probes": [],
+    }
+    assert condense_for_ai(full)["pods"][0]["last_termination"] == [crash]
+
+
 def test_parse_verdict_handles_fenced_json_and_rejects_garbage():
     raw = '```json\n{"healthy": false, "confidence": 1.4, "summary": "db down"}\n```'
     verdict = parse_verdict(raw)

@@ -27,6 +27,9 @@ spec:
         - name: backend
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          # On a crash, Kubernetes stores the last log lines in the pod status, so the health gate can
+          # read the real error even after the container's log files are gone.
+          terminationMessagePolicy: FallbackToLogsOnError
           ports:
             - name: http
               containerPort: 8000

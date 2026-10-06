@@ -48,6 +48,9 @@ def collect_pods(namespace: str, release: str) -> list[dict]:
     pods = []
     for item in items:
         statuses = item.get("status", {}).get("containerStatuses", [])
+        last_terminations = [
+            s["lastState"]["terminated"] for s in statuses if "terminated" in s.get("lastState", {})
+        ]
         pods.append(
             {
                 "name": item["metadata"]["name"],
@@ -59,6 +62,16 @@ def collect_pods(namespace: str, release: str) -> list[dict]:
                     s["state"]["waiting"].get("reason", "")
                     for s in statuses
                     if "waiting" in s.get("state", {})
+                ],
+                # Why the previous attempt died: reason, exit code, and (with FallbackToLogsOnError)
+                # the tail of its log, preserved by Kubernetes in the pod status.
+                "last_termination": [
+                    {
+                        "reason": t.get("reason", ""),
+                        "exit_code": t.get("exitCode"),
+                        "message": (t.get("message") or "")[-800:],
+                    }
+                    for t in last_terminations
                 ],
             }
         )
@@ -83,21 +96,27 @@ def probe(url: str, attempts: int = 1, delay: float = 10.0) -> dict:
 
 def collect_evidence(namespace: str, release: str, base_url: str) -> dict:
     events = kubectl("get", "events", "-n", namespace, "--sort-by=.lastTimestamp").splitlines()[-30:]
-    logs = kubectl(
+    pods = collect_pods(namespace, release)
+
+    # Logs from unhealthy pods first: healthy replicas' routine access logs must not crowd them out.
+    logs: list[str] = []
+    for pod in pods:
+        if pod["ready"]:
+            continue
+        for extra in ([], ["--previous"]):
+            lines = kubectl(
+                "logs", "-n", namespace, pod["name"], "--all-containers", "--tail=40", *extra
+            ).splitlines()
+            label = f"{pod['name']}{' previous' if extra else ''}"
+            logs += [f"[{label}] {line}" for line in lines if "unable to retrieve container logs" not in line]
+
+    release_logs = kubectl(
         "logs", "-n", namespace,
         "-l", f"app.kubernetes.io/instance={release},app.kubernetes.io/component=backend",
         f"--tail={MAX_LOG_LINES}", "--prefix", "--all-containers",
-    ).splitlines()[-MAX_LOG_LINES:]
-
-    pods = collect_pods(namespace, release)
-    # A crash-looping container has usually just restarted, so its current log is nearly empty;
-    # the actual error is in the log of the previous (crashed) attempt.
-    for pod in pods:
-        if pod["restarts"] > 0 and not pod["ready"]:
-            previous = kubectl(
-                "logs", "-n", namespace, pod["name"], "--previous", "--all-containers", "--tail=40"
-            ).splitlines()
-            logs += [f"[{pod['name']} previous crash] {line}" for line in previous]
+    ).splitlines()
+    logs += [line for line in release_logs if not any(p in line for p in NOISE_PATTERNS)]
+    logs = logs[:MAX_LOG_LINES * 2]
 
     probes = []
     if base_url:
@@ -155,6 +174,7 @@ def hard_checks(evidence: dict) -> list[str]:
 NOISE_PATTERNS = ("GET /health", "GET /api/health")
 MAX_AI_LOG_LINES = 25
 MAX_AI_EVENTS = 15
+AI_POD_FIELDS = ("name", "component", "phase", "ready", "restarts", "waiting_reasons", "last_termination")
 
 
 def _dedupe(lines: list[str]) -> list[str]:
@@ -180,11 +200,12 @@ def condense_for_ai(evidence: dict) -> dict:
 
     return {
         "pods": [
-            {k: p[k] for k in ("name", "component", "phase", "ready", "restarts", "waiting_reasons")}
+            {k: p.get(k) for k in AI_POD_FIELDS if p.get(k) not in (None, [])}
             for p in evidence["pods"]
         ],
         "events": _dedupe(events)[-MAX_AI_EVENTS:],
-        "backend_logs": _dedupe(important or logs)[-MAX_AI_LOG_LINES:],
+        # Unhealthy pods' lines are collected first, so keep the head of the list.
+        "backend_logs": _dedupe(important or logs)[:MAX_AI_LOG_LINES],
         "http_probes": evidence["http_probes"],
         "rollout_status": evidence.get("rollout_status", ""),
         "hard_check_problems": evidence.get("hard_check_problems", []),
