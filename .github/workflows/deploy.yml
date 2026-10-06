@@ -157,7 +157,8 @@ jobs:
           BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
         run: |
           pip install -q -r requirements.txt
-          python health_check.py --namespace "$NAMESPACE" --release "$RELEASE" --url "$APP_URL"
+          python health_check.py --namespace "$NAMESPACE" --release "$RELEASE" --url "$APP_URL" \
+            --rollout-status "${{ steps.helm.outcome }}"
 
       - name: Upload health report
         if: always()

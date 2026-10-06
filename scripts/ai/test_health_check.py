@@ -26,6 +26,17 @@ def test_hard_checks_catch_crash_loop_and_failed_probe():
     assert any("failed" in p for p in problems)
 
 
+def test_failed_rollout_is_caught_even_when_old_pods_still_serve():
+    ev = evidence()  # old pods ready, URL healthy
+    ev["pods"].append(
+        {"name": "b-new", "component": "backend", "ready": False, "restarts": 3, "waiting_reasons": []}
+    )
+    ev["rollout_status"] = "failure"
+    problems = hard_checks(ev)
+    assert any("rollout failed" in p for p in problems)
+    assert any("b-new is not ready after 3 restarts" in p for p in problems)
+
+
 def test_ai_cannot_override_hard_failure():
     healthy, _ = decide(["pod crashing"], HEALTHY_AI, threshold=0.7)
     assert healthy is False

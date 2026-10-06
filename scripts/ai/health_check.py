@@ -106,9 +106,17 @@ def collect_evidence(namespace: str, release: str, base_url: str) -> dict:
     }
 
 
+CRASH_RESTART_THRESHOLD = 2
+
+
 def hard_checks(evidence: dict) -> list[str]:
     problems = []
     pods = evidence["pods"]
+
+    # During a rolling update the old pods keep serving traffic, so the URL can look fine while the
+    # new version never becomes ready. Helm's own rollout result catches that.
+    if evidence.get("rollout_status") == "failure":
+        problems.append("Helm rollout failed or timed out: the new version never became ready.")
 
     if not pods:
         problems.append("No pods found for the release.")
@@ -116,6 +124,9 @@ def hard_checks(evidence: dict) -> list[str]:
         bad = BAD_WAITING_REASONS.intersection(pod["waiting_reasons"])
         if bad:
             problems.append(f"Pod {pod['name']} is in {', '.join(sorted(bad))}.")
+        elif not pod["ready"] and pod.get("restarts", 0) >= CRASH_RESTART_THRESHOLD:
+            # Between restarts a crash-looping pod briefly shows no waiting reason.
+            problems.append(f"Pod {pod['name']} is not ready after {pod['restarts']} restarts.")
 
     for component in ("backend", "frontend"):
         if pods and not any(p["ready"] for p in pods if p["component"] == component):
@@ -165,6 +176,7 @@ def condense_for_ai(evidence: dict) -> dict:
         "events": _dedupe(events)[-MAX_AI_EVENTS:],
         "backend_logs": _dedupe(important or logs)[-MAX_AI_LOG_LINES:],
         "http_probes": evidence["http_probes"],
+        "rollout_status": evidence.get("rollout_status", ""),
         "hard_check_problems": evidence.get("hard_check_problems", []),
     }
 
@@ -210,12 +222,16 @@ def main() -> int:
     parser.add_argument("--settle-seconds", type=int, default=45, help="Wait before collecting evidence")
     parser.add_argument("--threshold", type=float, default=0.7, help="Min AI confidence to fail the gate")
     parser.add_argument("--report", default="health-report.json")
+    parser.add_argument(
+        "--rollout-status", default="", help="Outcome of the helm upgrade step (success/failure)"
+    )
     args = parser.parse_args()
 
     print(f"Waiting {args.settle_seconds}s for the rollout to settle...")
     time.sleep(args.settle_seconds)
 
     evidence = collect_evidence(args.namespace, args.release, args.url)
+    evidence["rollout_status"] = args.rollout_status
     problems = hard_checks(evidence)
     evidence["hard_check_problems"] = problems
 
