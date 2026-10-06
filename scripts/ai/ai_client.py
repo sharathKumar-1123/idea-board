@@ -78,11 +78,23 @@ def _call_github_models(system_prompt: str, user_message: str) -> str:
     request = urllib.request.Request(
         GITHUB_MODELS_URL,
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=60) as resp:
-        return json.load(resp)["choices"][0]["message"]["content"]
+        raw = resp.read().decode(errors="replace")
+        try:
+            return json.loads(raw)["choices"][0]["message"]["content"]
+        except (json.JSONDecodeError, KeyError, IndexError) as exc:
+            content_type = resp.headers.get("Content-Type")
+            raise RuntimeError(
+                f"unexpected response (HTTP {resp.status}, {content_type}): {raw[:200]!r}"
+            ) from exc
 
 
 def parse_verdict(raw: str) -> dict | None:
