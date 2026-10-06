@@ -18,6 +18,12 @@ variable "subnet_ids" {
   type        = list(string)
 }
 
+variable "admin_principal_arns" {
+  description = "IAM principal ARNs granted cluster-admin access (in addition to the creator)."
+  type        = list(string)
+  default     = []
+}
+
 variable "node_instance_type" {
   type    = string
   default = "t3.small"

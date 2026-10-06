@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # OIDC: exchange GitHub's identity token for short-lived AWS credentials
   models: read # GitHub Models fallback for the AI health check
 
 concurrency:
@@ -36,7 +37,10 @@ env:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Skipped until the AWS bootstrap has been applied and AWS_ROLE_ARN is configured.
+    if: >-
+      vars.AWS_ROLE_ARN != '' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,8 +52,9 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: idea-board-deploy-${{ github.run_id }}
+          role-duration-seconds: 7200
           aws-region: ${{ env.AWS_REGION }}
 
       # ---------- Infrastructure ----------

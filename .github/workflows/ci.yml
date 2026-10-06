@@ -57,9 +57,12 @@ jobs:
       - name: Terraform fmt & validate
         run: |
           terraform fmt -check -recursive infra
-          cd infra/envs/aws
-          terraform init -backend=false -input=false
-          terraform validate
+          for dir in infra/bootstrap/aws infra/envs/aws; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
 
       - uses: azure/setup-helm@v4
 

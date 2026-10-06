@@ -30,6 +30,12 @@ variable "kubernetes_version" {
   default     = null
 }
 
+variable "cluster_admin_arns" {
+  description = "Extra IAM principals (e.g. your own user/role) given kubectl admin access."
+  type        = list(string)
+  default     = []
+}
+
 variable "node_instance_type" {
   type    = string
   default = "t3.small"

@@ -25,14 +25,15 @@ module "network" {
 module "cluster" {
   source = "../../modules/aws/cluster"
 
-  name               = var.name
-  kubernetes_version = var.kubernetes_version
-  vpc_id             = module.network.vpc_id
-  subnet_ids         = module.network.private_subnet_ids
-  node_instance_type = var.node_instance_type
-  node_min_size      = var.node_min_size
-  node_max_size      = var.node_max_size
-  node_desired_size  = var.node_desired_size
+  name                 = var.name
+  kubernetes_version   = var.kubernetes_version
+  admin_principal_arns = var.cluster_admin_arns
+  vpc_id               = module.network.vpc_id
+  subnet_ids           = module.network.private_subnet_ids
+  node_instance_type   = var.node_instance_type
+  node_min_size        = var.node_min_size
+  node_max_size        = var.node_max_size
+  node_desired_size    = var.node_desired_size
 }
 
 module "database" {
