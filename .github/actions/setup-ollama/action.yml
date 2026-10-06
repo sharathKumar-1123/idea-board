@@ -1,0 +1,31 @@
+name: Set up Ollama
+description: Install Ollama on the runner, start it, and pull (or restore from cache) an open-source model.
+
+inputs:
+  model:
+    description: Ollama model tag
+    required: false
+    default: qwen2.5:3b
+
+runs:
+  using: composite
+  steps:
+    - name: Restore model cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ollama/models
+        key: ollama-${{ runner.os }}-${{ inputs.model }}
+
+    - name: Install and start Ollama
+      shell: bash
+      run: |
+        curl -fsSL https://ollama.com/install.sh | sh
+        # Run as the runner user so models land in ~/.ollama (cached above), not the system service's home.
+        sudo systemctl stop ollama 2>/dev/null || true
+        nohup ollama serve > /tmp/ollama.log 2>&1 &
+        for _ in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done
+        curl -sf http://127.0.0.1:11434/api/version
+
+    - name: Pull model
+      shell: bash
+      run: ollama pull "${{ inputs.model }}"

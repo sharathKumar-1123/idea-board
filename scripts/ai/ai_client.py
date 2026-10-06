@@ -1,10 +1,11 @@
 """Provider-agnostic LLM client for deployment analysis.
 
 AI_PROVIDER selects the backend:
-  bedrock (default) - Amazon Bedrock Converse API, authenticated with the pipeline's AWS credentials.
-                      Requires BEDROCK_MODEL_ID (model or inference profile ID from the Bedrock console).
-  github            - GitHub Models, authenticated with GITHUB_TOKEN. Optional GITHUB_MODEL.
-  none              - Skip AI analysis; the pipeline relies on hard checks only.
+  ollama (default) - Open-source model served by Ollama on the CI runner itself (OLLAMA_HOST,
+                     OLLAMA_MODEL). No API keys, and deployment evidence never leaves the pipeline.
+  bedrock          - Amazon Bedrock Converse API, authenticated with the pipeline's AWS credentials.
+                     Requires BEDROCK_MODEL_ID (model or inference profile ID from the Bedrock console).
+  none             - Skip AI analysis; the pipeline relies on hard checks only.
 
 Any failure returns None so a broken or unavailable AI never blocks a deployment decision.
 """
@@ -16,19 +17,19 @@ import os
 import re
 import urllib.request
 
-GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
 MAX_TOKENS = 800
+DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
 
 
 def analyze(system_prompt: str, evidence: dict) -> dict | None:
-    provider = os.getenv("AI_PROVIDER", "bedrock").lower()
+    provider = os.getenv("AI_PROVIDER", "ollama").lower()
     user_message = json.dumps(evidence, indent=2, default=str)
 
     try:
-        if provider == "bedrock":
+        if provider == "ollama":
+            raw = _call_ollama(system_prompt, user_message)
+        elif provider == "bedrock":
             raw = _call_bedrock(system_prompt, user_message)
-        elif provider == "github":
-            raw = _call_github_models(system_prompt, user_message)
         elif provider == "none":
             return None
         else:
@@ -42,6 +43,32 @@ def analyze(system_prompt: str, evidence: dict) -> dict | None:
     if verdict is None:
         print(f"::warning::AI returned an unparseable response: {raw[:300]!r}")
     return verdict
+
+
+def _call_ollama(system_prompt: str, user_message: str) -> str:
+    host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    if not host.startswith("http"):
+        host = f"http://{host}"
+
+    body = {
+        "model": os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "format": "json",  # constrain the model to emit valid JSON
+        # Room for the evidence (logs/events) plus the answer; CPU inference, so keep it deterministic.
+        "options": {"temperature": 0, "num_ctx": 8192, "num_predict": MAX_TOKENS},
+    }
+    request = urllib.request.Request(
+        f"{host}/api/chat",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=300) as resp:
+        return json.load(resp)["message"]["content"]
 
 
 def _call_bedrock(system_prompt: str, user_message: str) -> str:
@@ -59,42 +86,6 @@ def _call_bedrock(system_prompt: str, user_message: str) -> str:
         inferenceConfig={"maxTokens": MAX_TOKENS, "temperature": 0},
     )
     return response["output"]["message"]["content"][0]["text"]
-
-
-def _call_github_models(system_prompt: str, user_message: str) -> str:
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN is not set")
-
-    body = {
-        "model": os.getenv("GITHUB_MODEL", "openai/gpt-4o-mini"),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        "temperature": 0,
-        "max_tokens": MAX_TOKENS,
-    }
-    request = urllib.request.Request(
-        GITHUB_MODELS_URL,
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=60) as resp:
-        raw = resp.read().decode(errors="replace")
-        try:
-            return json.loads(raw)["choices"][0]["message"]["content"]
-        except (json.JSONDecodeError, KeyError, IndexError) as exc:
-            content_type = resp.headers.get("Content-Type")
-            raise RuntimeError(
-                f"unexpected response (HTTP {resp.status}, {content_type}): {raw[:200]!r}"
-            ) from exc
 
 
 def parse_verdict(raw: str) -> dict | None:

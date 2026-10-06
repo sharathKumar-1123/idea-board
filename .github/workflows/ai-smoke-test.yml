@@ -1,19 +1,22 @@
 name: AI smoke test
 
-# Quick check that the configured AI provider answers with a valid verdict, without deploying anything.
+# Quick check that an AI provider returns a valid verdict for a known-broken deployment, without deploying.
 on:
   workflow_dispatch:
     inputs:
       provider:
         description: "Provider to test"
         type: choice
-        options: [github, bedrock]
-        default: github
+        options: [ollama, bedrock]
+        default: ollama
 
 permissions:
   contents: read
   id-token: write
-  models: read
+
+env:
+  AI_PROVIDER: ${{ inputs.provider }}
+  OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'qwen2.5:3b' }}
 
 jobs:
   smoke-test:
@@ -27,6 +30,11 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
+      - uses: ./.github/actions/setup-ollama
+        if: inputs.provider == 'ollama'
+        with:
+          model: ${{ env.OLLAMA_MODEL }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -34,14 +42,12 @@ jobs:
       - name: Ask the AI to judge a sample (broken) deployment
         working-directory: scripts/ai
         env:
-          AI_PROVIDER: ${{ inputs.provider }}
           BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install -q -r requirements.txt
           python - <<'EOF'
           from pathlib import Path
-          import ai_client, json, sys
+          import ai_client, json, sys, time
 
           evidence = {
               "pods": [{"name": "idea-board-backend-abc", "component": "backend", "phase": "Running",
@@ -52,7 +58,9 @@ jobs:
               "http_probes": [{"url": "http://example/api/health", "status": 503, "ok": False, "error": ""}],
               "hard_check_problems": ["Pod idea-board-backend-abc is in CrashLoopBackOff."],
           }
-          verdict = ai_client.analyze((Path("prompt.md")).read_text(), evidence)
+          start = time.time()
+          verdict = ai_client.analyze(Path("prompt.md").read_text(), evidence)
+          print(f"answered in {time.time() - start:.1f}s")
           print(json.dumps(verdict, indent=2))
           sys.exit(0 if verdict else 1)
           EOF

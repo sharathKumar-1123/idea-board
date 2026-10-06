@@ -21,7 +21,6 @@ on:
 permissions:
   contents: read
   id-token: write # OIDC: exchange GitHub's identity token for short-lived AWS credentials
-  models: read # GitHub Models fallback for the AI health check
 
 concurrency:
   group: deploy-aws
@@ -34,6 +33,8 @@ env:
   RELEASE: idea-board
   NAMESPACE: idea-board
   CHART: deploy/helm/idea-board
+  AI_PROVIDER: ${{ vars.AI_PROVIDER || 'ollama' }}
+  OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'qwen2.5:3b' }}
 
 jobs:
   deploy:
@@ -141,14 +142,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up self-hosted LLM
+        if: env.AI_PROVIDER == 'ollama'
+        continue-on-error: true # if this fails, the gate falls back to hard checks
+        uses: ./.github/actions/setup-ollama
+        with:
+          model: ${{ env.OLLAMA_MODEL }}
+
       - name: AI health check
         id: health
         continue-on-error: true
         working-directory: scripts/ai
         env:
-          AI_PROVIDER: ${{ vars.AI_PROVIDER || 'bedrock' }}
           BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install -q -r requirements.txt
           python health_check.py --namespace "$NAMESPACE" --release "$RELEASE" --url "$APP_URL"
