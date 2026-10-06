@@ -35,8 +35,13 @@ locals {
     ? aws_iam_openid_connect_provider.github[0].arn
     : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${local.oidc_url}"
   )
-  # GitHub keeps the owner's original casing in the token's `sub` claim; IAM matching is case-sensitive.
-  repo_variants = distinct([var.github_repo, lower(var.github_repo)])
+  # GitHub's immutable subject format pins the numeric owner/repo IDs, so a deleted-and-recreated repo with
+  # the same name cannot assume the role: repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main
+  owner     = split("/", var.github_repo)[0]
+  repo_name = split("/", var.github_repo)[1]
+  allowed_subjects = [
+    "repo:${local.owner}@${var.github_owner_id}/${local.repo_name}@${var.github_repo_id}:ref:refs/heads/main",
+  ]
 }
 
 # ---------- Terraform state bucket ----------
@@ -90,9 +95,11 @@ resource "aws_iam_role" "github_actions" {
       Principal = { Federated = local.oidc_arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
-        StringEquals = { "${local.oidc_url}:aud" = "sts.amazonaws.com" }
         # Only workflows running from the main branch of this repository can assume the role.
-        StringLike = { "${local.oidc_url}:sub" = [for r in local.repo_variants : "repo:${r}:ref:refs/heads/main"] }
+        StringEquals = {
+          "${local.oidc_url}:aud" = "sts.amazonaws.com"
+          "${local.oidc_url}:sub" = local.allowed_subjects
+        }
       }
     }]
   })

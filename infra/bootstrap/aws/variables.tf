@@ -9,6 +9,20 @@ variable "github_repo" {
   default     = "sharathKumar-1123/idea-board"
 }
 
+# Numeric IDs used in GitHub's immutable OIDC subject. Look them up with:
+#   gh api repos/<owner>/<repo>/actions/oidc/customization/sub   (sub_claim_prefix)
+variable "github_owner_id" {
+  description = "Numeric GitHub user/org ID of the repository owner."
+  type        = string
+  default     = "66818338"
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID."
+  type        = string
+  default     = "1405865317"
+}
+
 variable "create_oidc_provider" {
   description = "Set to false if the account already has the GitHub OIDC provider (only one is allowed per account)."
   type        = bool
