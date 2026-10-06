@@ -1,5 +1,5 @@
 from ai_client import parse_verdict
-from health_check import decide, hard_checks
+from health_check import condense_for_ai, decide, hard_checks
 
 HEALTHY_AI = {"healthy": True, "confidence": 0.9, "summary": "", "likely_cause": "", "suggested_fix": ""}
 UNHEALTHY_AI = {**HEALTHY_AI, "healthy": False}
@@ -43,6 +43,24 @@ def test_low_confidence_ai_does_not_fail_the_gate():
 
 def test_missing_ai_falls_back_to_hard_checks():
     assert decide([], None, threshold=0.7)[0] is True
+
+
+def test_condense_keeps_errors_and_drops_health_check_noise():
+    full = {
+        "pods": [{"name": "b", "component": "backend", "phase": "Running", "ready": False,
+                  "restarts": 3, "waiting_reasons": ["CrashLoopBackOff"], "extra": "dropped"}],
+        "events": ["Normal Pulled ...", "Warning BackOff restarting failed container"],
+        "backend_logs": [
+            '[pod/b-1/backend] INFO: 10.0.0.1 - "GET /health HTTP/1.1" 200 OK',
+            "[pod/b-1/backend] WARNING database not ready: could not translate host name",
+            "[pod/b-2/backend] WARNING database not ready: could not translate host name",
+        ],
+        "http_probes": [],
+    }
+    ai_view = condense_for_ai(full)
+    assert ai_view["backend_logs"] == [full["backend_logs"][1]]
+    assert ai_view["events"] == ["Warning BackOff restarting failed container"]
+    assert "extra" not in ai_view["pods"][0]
 
 
 def test_parse_verdict_handles_fenced_json_and_rejects_garbage():

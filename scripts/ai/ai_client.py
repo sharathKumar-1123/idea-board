@@ -23,7 +23,7 @@ DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
 
 def analyze(system_prompt: str, evidence: dict) -> dict | None:
     provider = os.getenv("AI_PROVIDER", "ollama").lower()
-    user_message = json.dumps(evidence, indent=2, default=str)
+    user_message = json.dumps(evidence, separators=(",", ":"), default=str)  # compact: fewer tokens
 
     try:
         if provider == "ollama":

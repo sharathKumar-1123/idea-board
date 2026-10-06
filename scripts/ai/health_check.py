@@ -131,6 +131,44 @@ def hard_checks(evidence: dict) -> list[str]:
     return problems
 
 
+NOISE_PATTERNS = ("GET /health", "GET /api/health")
+MAX_AI_LOG_LINES = 25
+MAX_AI_EVENTS = 15
+
+
+def _dedupe(lines: list[str]) -> list[str]:
+    seen, out = set(), []
+    for line in lines:
+        # Drop the per-pod "[pod/name/container]" prefix so identical errors from replicas collapse.
+        key = line.split("] ", 1)[-1].strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(line)
+    return out
+
+
+def condense_for_ai(evidence: dict) -> dict:
+    """Keep the signal, drop the noise: small models on CPU need a short, focused prompt.
+
+    The full evidence still goes into the report artifact; only the LLM sees this condensed view.
+    """
+    logs = [line for line in evidence["backend_logs"] if not any(p in line for p in NOISE_PATTERNS)]
+    keywords = ("ERROR", "WARN", "EXCEPTION", "FAIL")
+    important = [line for line in logs if any(k in line.upper() for k in keywords)]
+    events = [e for e in evidence["events"] if "Warning" in e] or evidence["events"]
+
+    return {
+        "pods": [
+            {k: p[k] for k in ("name", "component", "phase", "ready", "restarts", "waiting_reasons")}
+            for p in evidence["pods"]
+        ],
+        "events": _dedupe(events)[-MAX_AI_EVENTS:],
+        "backend_logs": _dedupe(important or logs)[-MAX_AI_LOG_LINES:],
+        "http_probes": evidence["http_probes"],
+        "hard_check_problems": evidence.get("hard_check_problems", []),
+    }
+
+
 def decide(problems: list[str], verdict: dict | None, threshold: float) -> tuple[bool, str]:
     if problems:
         return False, "Hard checks failed."
@@ -182,7 +220,9 @@ def main() -> int:
     evidence["hard_check_problems"] = problems
 
     prompt = (Path(__file__).parent / "prompt.md").read_text()
-    verdict = ai_client.analyze(prompt, evidence)
+    started = time.time()
+    verdict = ai_client.analyze(prompt, condense_for_ai(evidence))
+    print(f"AI analysis took {time.time() - started:.0f}s")
     healthy, reason = decide(problems, verdict, args.threshold)
 
     summary = render_summary(healthy, reason, problems, verdict)

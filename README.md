@@ -5,7 +5,7 @@ A small full-stack app (React + FastAPI + PostgreSQL) deployed on Kubernetes by 
 | | |
 |---|---|
 | **Live URL (AWS)** | `http://<filled-in-after-deploy>` |
-| **Stack** | React (Vite) · FastAPI · PostgreSQL · Docker · Terraform · EKS · RDS · Helm · ingress-nginx · GitHub Actions · Amazon Bedrock |
+| **Stack** | React (Vite) · FastAPI · PostgreSQL · Docker · Terraform · EKS · RDS · Helm · ingress-nginx · GitHub Actions · Ollama (self-hosted LLM) / Amazon Bedrock |
 
 ---
 
@@ -28,13 +28,14 @@ flowchart LR
         end
         be --> rds[(RDS PostgreSQL<br/>private subnets)]
       end
-      bedrock[Amazon Bedrock<br/>Claude]
+      bedrock[Amazon Bedrock<br/>optional]
     end
 
     cd -->|terraform apply| VPC
     cd -->|helm upgrade| EKS
     cd -->|evidence| gate{AI health gate}
-    gate -->|analysis| bedrock
+    gate -->|analysis| llm[Self-hosted LLM<br/>Ollama on CI runner]
+    gate -.->|optional| bedrock
     gate -->|healthy| keep[Keep release]
     gate -->|unhealthy| rb[helm rollback + summary]
     user[User] --> lb
@@ -52,7 +53,7 @@ flowchart LR
 | IaC | Terraform with modules and S3 remote state with locking | Reproducible infrastructure with a clean per-cloud boundary |
 | Packaging | One Helm chart plus `values-<cloud>.yaml` | The same chart deploys to every cloud |
 | CI/CD | GitHub Actions | Free for public repos; reusable workflows |
-| AI | Amazon Bedrock (Claude), with GitHub Models as a fallback | Uses the pipeline's existing AWS identity, so no extra API keys |
+| AI | Open-source LLM (Qwen 2.5 3B) served by **Ollama on the CI runner**; Amazon Bedrock as a pluggable alternative | No API keys, no third-party data sharing, nothing that can be rate-limited or retired |
 
 ### Repository layout
 
@@ -118,15 +119,16 @@ cd scripts/ai && pip install -r requirements.txt pytest && pytest
    terraform output   # state_bucket, github_actions_role_arn
    ```
    If the account already has a GitHub OIDC provider, run `terraform apply -var create_oidc_provider=false`.
-4. **Bedrock model access:** in the AWS Console go to **Amazon Bedrock → Model catalog**, open a Claude model and complete the first-time Anthropic use-case form if prompted. Copy its **model ID / inference profile ID**.
+4. **AI:** nothing to set up. The default provider runs an open-source model on the CI runner. *(Optional: to use Amazon Bedrock instead, enable a model in the Bedrock console and set `AI_PROVIDER=bedrock` and `BEDROCK_MODEL_ID`.)*
 5. **GitHub repository variables** (Settings → Secrets and variables → Actions → *Variables*). None of these are secrets:
 
    | Name | Value |
    |---|---|
    | `AWS_ROLE_ARN` | `github_actions_role_arn` from step 3 |
    | `TF_STATE_BUCKET` | `state_bucket` from step 3 |
-   | `BEDROCK_MODEL_ID` | Model ID from step 4 |
-   | `AI_PROVIDER` (optional) | `bedrock` (default), `github` or `none` |
+   | `AI_PROVIDER` (optional) | `ollama` (default), `bedrock` or `none` |
+   | `OLLAMA_MODEL` (optional) | Default `qwen2.5:3b` |
+   | `BEDROCK_MODEL_ID` (only for Bedrock) | Model or inference profile ID |
 
 6. **Optional: kubectl access from your laptop.** The pipeline role creates the cluster, so add your own IAM principal ARN to `cluster_admin_arns` in `infra/envs/aws/terraform.tfvars`.
 
@@ -182,7 +184,7 @@ After every `helm upgrade`, [`scripts/ai/health_check.py`](scripts/ai/health_che
 
 1. **Collects evidence:** pod phase, readiness, restarts and waiting reasons; recent Kubernetes events; the last 80 backend log lines; HTTP probes against the public URL (`/api/health`, `/api/ideas`, `/`).
 2. **Runs deterministic hard checks:** CrashLoopBackOff, image pull errors, no ready pods, failing HTTP probes.
-3. **Asks an LLM** (Claude on Amazon Bedrock) to assess the evidence using a structured prompt ([`prompt.md`](scripts/ai/prompt.md)). It must return strict JSON: `healthy`, `confidence`, `summary`, `likely_cause`, `suggested_fix`.
+3. **Asks an LLM** (by default an open-source **Qwen 2.5 3B** model served by **Ollama on the CI runner itself**; Amazon Bedrock is a drop-in alternative) to assess the evidence using a structured prompt ([`prompt.md`](scripts/ai/prompt.md)). It must return strict JSON: `healthy`, `confidence`, `summary`, `likely_cause`, `suggested_fix`.
 4. **Decides** whether to keep the release or roll it back with `helm rollback`.
 5. **Explains:** writes a human-readable report to the GitHub Actions run summary and uploads the full evidence and verdict as a `health-report` artifact.
 
@@ -200,16 +202,26 @@ Example output for a deploy with a broken database host:
 >
 > ### ↩️ Rolled back to the previous release
 
+### Why a self-hosted model by default
+
+I started with a hosted API (Amazon Bedrock), then made a self-hosted open-source model the default for three reasons:
+
+- **Privacy:** pod logs and events can contain sensitive details. With Ollama on the runner, they never leave the pipeline.
+- **Reliability:** hosted options can be throttled, retired or blocked by account limits (new-account quotas, marketplace billing). A pinned open model in CI depends on none of these.
+- **Cost and portability:** it's free, needs no keys, and works the same whichever cloud the app is deployed to.
+
+The trade-off is a smaller model and roughly 1 extra minute per deploy (model download is cached between runs). Because the decision rules are enforced in code, a smaller model is enough: it explains failures, and it never gets the final say on its own. For deeper analysis, set `AI_PROVIDER=bedrock`.
+
 ### Design choices: making it safe, not a gimmick
 
 | Principle | How it's enforced |
 |---|---|
 | **The AI never executes anything** | The LLM only returns a JSON verdict. The pipeline's own code chooses between two fixed actions: keep or `helm rollback`. No LLM-generated commands are ever run. |
 | **The AI can only make the gate stricter** | Hard-check failures always mean rollback, even if the AI says "healthy". The AI can fail an otherwise-passing release (for example, error patterns in logs), but only above a confidence threshold (default 0.7). |
-| **Graceful degradation** | If Bedrock is unreachable, throttled, or returns invalid JSON, the gate falls back to hard checks only, so a broken AI never blocks or approves a deploy on its own. |
+| **Graceful degradation** | If the model is unavailable, too slow, or returns invalid JSON, the gate falls back to hard checks only, so a broken AI never blocks or approves a deploy on its own. |
 | **Validated output** | The response is parsed and schema-checked, and confidence is clamped to 0–1. Anything malformed is discarded. |
-| **No extra secrets** | Bedrock is called with the pipeline's existing AWS identity. Terraform also creates a least-privilege `bedrock:InvokeModel` policy (`ai_health_check_policy_arn` output) for a dedicated pipeline role. |
-| **Provider-agnostic** | [`ai_client.py`](scripts/ai/ai_client.py) has one interface with interchangeable backends (`bedrock`, `github`, `none`), selected by the `AI_PROVIDER` variable. |
+| **No secrets, no data leaving the pipeline** | The default LLM runs on the CI runner, so logs and events are never sent to a third party and there is no API key to manage or leak. When Bedrock is used, it is called with the pipeline's existing AWS identity; Terraform creates a least-privilege `bedrock:InvokeModel` policy for that case. |
+| **Provider-agnostic** | [`ai_client.py`](scripts/ai/ai_client.py) has one interface with interchangeable backends (`ollama`, `bedrock`, `none`), selected by the `AI_PROVIDER` variable. |
 | **Tested** | The decision logic and parser have unit tests ([`test_health_check.py`](scripts/ai/test_health_check.py)) that run in CI. |
 
 ### Value to the DevOps lifecycle
