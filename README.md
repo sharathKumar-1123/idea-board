@@ -5,7 +5,7 @@ A small full-stack app (React + FastAPI + PostgreSQL) deployed on Kubernetes by 
 | | |
 |---|---|
 | **Live URL (AWS)** | `http://<filled-in-after-deploy>` |
-| **Stack** | React (Vite) · FastAPI · PostgreSQL · Docker · Terraform · EKS · RDS · Helm · ingress-nginx · GitHub Actions · Ollama (self-hosted LLM) / Amazon Bedrock |
+| **Stack** | React (Vite) · FastAPI · PostgreSQL · Docker · Terraform · EKS · RDS · Helm · ingress-nginx · GitHub Actions · Ollama (self-hosted LLM) |
 
 ---
 
@@ -28,14 +28,12 @@ flowchart LR
         end
         be --> rds[(RDS PostgreSQL<br/>private subnets)]
       end
-      bedrock[Amazon Bedrock<br/>optional]
     end
 
     cd -->|terraform apply| VPC
     cd -->|helm upgrade| EKS
     cd -->|evidence| gate{AI health gate}
     gate -->|analysis| llm[Self-hosted LLM<br/>Ollama on CI runner]
-    gate -.->|optional| bedrock
     gate -->|healthy| keep[Keep release]
     gate -->|unhealthy| rb[helm rollback + summary]
     user[User] --> lb
