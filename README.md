@@ -264,18 +264,8 @@ The platform is split into a **thin cloud-specific layer** and a **cloud-neutral
 **Portable building blocks:**
 - **Kubernetes** is the runtime abstraction, and the chart uses only standard resources (Deployment, Service, Ingress).
 - **ingress-nginx** gives every cloud the same public entry point. On any cloud, its `LoadBalancer` Service gets an external address from that cloud's load balancer.
-- **Images live in GHCR**, not ECR/GCR/ACR, so they can be pulled from anywhere.
+- **Images live in GHCR**, not a cloud-specific registry, so they can be pulled from anywhere.
 - **The AI gate** only uses `kubectl` and HTTP. The LLM provider is pluggable and separate from where the app runs.
-
-**Adding a cloud (for example GCP):**
-1. Add `infra/modules/gcp/{network,cluster,database}` (VPC, GKE, Cloud SQL).
-2. Add `infra/envs/gcp` that composes them and exposes the **same output contract** (for example `kubeconfig_command = "gcloud container clusters get-credentials …"`).
-3. Add `deploy/helm/idea-board/values-gcp.yaml` (usually just a few lines, or empty).
-4. Point the deploy workflow at the new environment with `CLOUD=gcp` and `TF_DIR=infra/envs/gcp`, plus that cloud's login step.
-
-No application code, chart templates or AI logic change.
-
-> **Current status:** the submission is deployed on **AWS**. The second-cloud environment was not deployed within the time available. The steps above describe exactly what's required, and the layering is designed so it doesn't touch the cloud-neutral layer.
 
 ---
 
