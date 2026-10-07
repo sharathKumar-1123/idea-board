@@ -1,6 +1,8 @@
 name: Deploy
 
+# Releases the application onto the platform created by the Infra workflow, then runs the AI health gate.
 # Runs after CI succeeds on main, or manually (with optional chaos to demo the AI rollback).
+# It never changes infrastructure: Terraform is only read here, for the cluster connection.
 on:
   workflow_run:
     workflows: [CI]
@@ -22,8 +24,9 @@ permissions:
   contents: read
   id-token: write # OIDC: exchange GitHub's identity token for short-lived AWS credentials
 
+# Shared with Infra and Destroy so they never change the environment at the same time.
 concurrency:
-  group: deploy-aws
+  group: aws-platform
   cancel-in-progress: false
 
 env:
@@ -55,63 +58,40 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: idea-board-deploy-${{ github.run_id }}
-          role-duration-seconds: 7200
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------- Infrastructure ----------
+      # ---------- Platform lookup (read-only) ----------
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
-      - name: Terraform apply
+      - name: Check the platform exists
+        id: platform
         working-directory: ${{ env.TF_DIR }}
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="region=${AWS_REGION}"
-          terraform apply -auto-approve -input=false
-
-      - name: Read infrastructure outputs
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          DB_PASSWORD="$(terraform output -raw db_password)"
-          echo "::add-mask::$DB_PASSWORD"
-          {
-            echo "KUBECONFIG_CMD=$(terraform output -raw kubeconfig_command)"
-            echo "DB_HOST=$(terraform output -raw db_host)"
-            echo "DB_PORT=$(terraform output -raw db_port)"
-            echo "DB_NAME=$(terraform output -raw db_name)"
-            echo "DB_USER=$(terraform output -raw db_username)"
-            echo "DB_PASSWORD=$DB_PASSWORD"
-          } >> "$GITHUB_ENV"
-
-      # ---------- Cluster prerequisites ----------
-      - uses: azure/setup-helm@v4
-
-      - name: Connect to cluster
-        run: $KUBECONFIG_CMD
-
-      - name: Install ingress-nginx
-        run: |
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo update
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            --namespace ingress-nginx --create-namespace --wait --timeout 10m
-
-      - name: Create database secret
-        run: |
-          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret generic idea-board-db -n "$NAMESPACE" \
-            --from-literal=host="$DB_HOST" \
-            --from-literal=port="$DB_PORT" \
-            --from-literal=name="$DB_NAME" \
-            --from-literal=username="$DB_USER" \
-            --from-literal=password="$DB_PASSWORD" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            -backend-config="region=${AWS_REGION}" > /dev/null
+          if CMD="$(terraform output -raw kubeconfig_command 2>/dev/null)" && [ -n "$CMD" ]; then
+            echo "KUBECONFIG_CMD=$CMD" >> "$GITHUB_ENV"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No platform found. Run the Infra workflow (action: apply) first; skipping this deploy."
+            echo "### ⏭️ Skipped: platform not provisioned. Run **Infra → apply** first." >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # ---------- Application ----------
+      - uses: azure/setup-helm@v4
+        if: steps.platform.outputs.ready == 'true'
+
+      - name: Connect to cluster
+        if: steps.platform.outputs.ready == 'true'
+        run: $KUBECONFIG_CMD
+
       - name: Helm upgrade
         id: helm
+        if: steps.platform.outputs.ready == 'true'
         continue-on-error: true # the health gate below decides what happens next
         run: |
           EXTRA=()
@@ -127,6 +107,7 @@ jobs:
             --wait --timeout 4m
 
       - name: Resolve public URL
+        if: steps.platform.outputs.ready == 'true'
         run: |
           for _ in $(seq 1 30); do
             HOST="$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
@@ -139,11 +120,12 @@ jobs:
 
       # ---------- AI health gate ----------
       - uses: actions/setup-python@v5
+        if: steps.platform.outputs.ready == 'true'
         with:
           python-version: "3.12"
 
       - name: Set up self-hosted LLM
-        if: env.AI_PROVIDER == 'ollama'
+        if: steps.platform.outputs.ready == 'true' && env.AI_PROVIDER == 'ollama'
         continue-on-error: true # if this fails, the gate falls back to hard checks
         uses: ./.github/actions/setup-ollama
         with:
@@ -151,6 +133,7 @@ jobs:
 
       - name: AI health check
         id: health
+        if: steps.platform.outputs.ready == 'true'
         continue-on-error: true
         working-directory: scripts/ai
         env:
@@ -161,7 +144,7 @@ jobs:
             --rollout-status "${{ steps.helm.outcome }}"
 
       - name: Upload health report
-        if: always()
+        if: always() && steps.platform.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: health-report

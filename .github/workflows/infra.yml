@@ -1,0 +1,136 @@
+name: Infra
+
+# Provisions the platform: network, Kubernetes cluster, database (Terraform) and the cluster-level
+# prerequisites the app relies on (ingress controller, database credentials).
+# Runs only when infrastructure code changes on main, or manually (plan to review, apply to change).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/envs/**"
+      - "infra/modules/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = show what would change; apply = make the changes"
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+permissions:
+  contents: read
+  id-token: write # OIDC: short-lived AWS credentials, no stored keys
+
+# Shared with Deploy and Destroy so they never change the environment at the same time.
+concurrency:
+  group: aws-platform
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/envs/aws
+  NAMESPACE: idea-board
+  APPLY: ${{ github.event_name == 'push' || inputs.action == 'apply' }}
+
+jobs:
+  terraform:
+    # Skipped until the AWS bootstrap has been applied and AWS_ROLE_ARN is configured.
+    if: vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: idea-board-infra-${{ github.run_id }}
+          role-duration-seconds: 7200 # first-time EKS creation takes ~20 minutes
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+          {
+            echo "### 📋 Terraform plan"
+            grep -E "^(Plan:|No changes)" plan.txt || true
+            echo
+            echo "<details><summary>Full plan</summary>"
+            echo
+            echo '```'
+            cat plan.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        if: env.APPLY == 'true'
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false tfplan
+
+      # ---------- Cluster prerequisites (platform level, shared by every app release) ----------
+      - name: Read infrastructure outputs
+        if: env.APPLY == 'true'
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          DB_PASSWORD="$(terraform output -raw db_password)"
+          echo "::add-mask::$DB_PASSWORD"
+          {
+            echo "KUBECONFIG_CMD=$(terraform output -raw kubeconfig_command)"
+            echo "DB_HOST=$(terraform output -raw db_host)"
+            echo "DB_PORT=$(terraform output -raw db_port)"
+            echo "DB_NAME=$(terraform output -raw db_name)"
+            echo "DB_USER=$(terraform output -raw db_username)"
+            echo "DB_PASSWORD=$DB_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - uses: azure/setup-helm@v4
+        if: env.APPLY == 'true'
+
+      - name: Connect to cluster
+        if: env.APPLY == 'true'
+        run: $KUBECONFIG_CMD
+
+      - name: Install ingress-nginx
+        if: env.APPLY == 'true'
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace --wait --timeout 10m
+
+      - name: Create database secret
+        if: env.APPLY == 'true'
+        run: |
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic idea-board-db -n "$NAMESPACE" \
+            --from-literal=host="$DB_HOST" \
+            --from-literal=port="$DB_PORT" \
+            --from-literal=name="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Platform summary
+        if: env.APPLY == 'true'
+        run: |
+          HOST="$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')"
+          {
+            echo "### 🏗️ Platform ready"
+            echo "- Cluster connection: \`$KUBECONFIG_CMD\`"
+            echo "- Public entry point: http://$HOST"
+            echo "- Next: run the **Deploy** workflow to release the application."
+          } >> "$GITHUB_STEP_SUMMARY"

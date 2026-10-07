@@ -12,6 +12,11 @@ permissions:
   contents: read
   id-token: write
 
+# Shared with Infra and Deploy so they never change the environment at the same time.
+concurrency:
+  group: aws-platform
+  cancel-in-progress: false
+
 env:
   AWS_REGION: us-east-1
   TF_DIR: infra/envs/aws
