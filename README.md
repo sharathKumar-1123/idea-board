@@ -15,29 +15,41 @@ A small full-stack app (React + FastAPI + PostgreSQL) deployed on Kubernetes by 
 flowchart LR
     dev[Developer] -->|git push| gh[GitHub]
     gh --> ci[CI: test, lint, validate, build]
-    gh -->|infra/** changed| infra[Infra workflow]
-    ci -->|images| ghcr[(GHCR)]
+    ci -->|push images| ghcr[(GHCR<br/>container images)]
     ci -->|on success| cd[Deploy workflow]
+    gh -->|infra/** changed<br/>or manual| infra[Infra workflow]
 
     subgraph AWS
-      direction LR
+      oidc[OIDC role<br/>temporary credentials]
+      s3[(S3<br/>Terraform state)]
       subgraph VPC
-        lb[Load balancer] --> ing[ingress-nginx]
-        subgraph EKS
-          ing -->|/| fe[frontend pods]
-          ing -->|/api| be[backend pods]
+        subgraph public[Public subnets]
+          lb[Load balancer]
         end
-        be --> rds[(RDS PostgreSQL<br/>private subnets)]
+        subgraph private[Private subnets]
+          subgraph EKS
+            ing[ingress-nginx] -->|/| fe[frontend pods]
+            ing -->|/api| be[backend pods]
+          end
+          rds[(RDS PostgreSQL)]
+        end
       end
     end
 
+    user[User] --> lb --> ing
+    be --> rds
+    ghcr -.->|image pull| EKS
+
+    infra -->|login| oidc
+    cd -->|login| oidc
     infra -->|terraform apply<br/>+ ingress, DB secret| VPC
+    infra --- s3
     cd -->|helm upgrade| EKS
-    cd -->|evidence| gate{AI health gate}
+    cd -->|evidence from cluster + URL| gate{AI health gate}
     gate -->|analysis| llm[Self-hosted LLM<br/>Ollama on CI runner]
     gate -->|healthy| keep[Keep release]
     gate -->|unhealthy| rb[helm rollback + summary]
-    user[User] --> lb
+    rb -->|previous release| EKS
 ```
 
 **Request path:** user → cloud load balancer → ingress-nginx → `/` frontend (nginx serving the React build) or `/api` backend (FastAPI) → PostgreSQL.
